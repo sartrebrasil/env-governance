@@ -1,3 +1,4 @@
 org.springframework.boot.env.EnvironmentPostProcessor=\
 com.example.envgovernance.DeclaredVarsScanner,\
-com.example.envgovernance.UsageTrackingEnvironmentPostProcessor
+com.example.envgovernance.UsageTrackingEnvironmentPostProcessor,\
+com.example.envgovernance.RequiredEnvCheckEnvironmentPostProcessor
