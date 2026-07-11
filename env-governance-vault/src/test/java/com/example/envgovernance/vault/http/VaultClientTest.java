@@ -96,7 +96,7 @@ class VaultClientTest {
 				{"data":{"data":{"DB_PASSWORD":"secret123","DB_URL":"jdbc://localhost"}}}
 				""");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfig("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfig("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertEquals("secret123", secrets.get("DB_PASSWORD"));
@@ -111,7 +111,7 @@ class VaultClientTest {
 				{"data":{"data":{"KEY":"value"}}}
 				""");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfig("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfig("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertEquals("value", secrets.get("KEY"));
@@ -124,7 +124,7 @@ class VaultClientTest {
 				{"data":{"data":{"KEY":"value"}}}
 				""");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfig("secret/data/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfig("secret/data/myapp"))
 				.readSecrets("secret/data/myapp");
 
 		assertEquals("value", secrets.get("KEY"));
@@ -141,7 +141,7 @@ class VaultClientTest {
 				{"data":{"APP_SECRET":"abc","APP_KEY":"xyz"}}
 				""");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfigKvV1("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfigKvV1("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertEquals("abc", secrets.get("APP_SECRET"));
@@ -171,7 +171,7 @@ class VaultClientTest {
 					""");
 		});
 
-		Map<String, Object> secrets = new VaultClient(approleConfig("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(approleConfig("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertEquals("value", secrets.get("SECRET"));
@@ -312,7 +312,7 @@ class VaultClientTest {
 	void deveRetornarMapaVazioQuandoRespostaKvV2SemSegredos() {
 		stubGet("/v1/secret/data/myapp", 200, "{\"data\":{\"data\":{}}}");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfig("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfig("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertTrue(secrets.isEmpty());
@@ -322,7 +322,7 @@ class VaultClientTest {
 	void deveRetornarMapaVazioQuandoCampoDataAusente() {
 		stubGet("/v1/secret/data/myapp", 200, "{\"lease_id\":\"\",\"renewable\":false}");
 
-		Map<String, Object> secrets = new VaultClient(tokenConfig("secret/myapp"))
+		Map<String, String> secrets = new VaultClient(tokenConfig("secret/myapp"))
 				.readSecrets("secret/myapp");
 
 		assertTrue(secrets.isEmpty());

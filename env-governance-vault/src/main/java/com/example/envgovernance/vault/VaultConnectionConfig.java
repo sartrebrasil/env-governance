@@ -1,23 +1,22 @@
 package com.example.envgovernance.vault;
 
-import org.springframework.core.env.ConfigurableEnvironment;
-
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Configuração de conexão com o HashiCorp Vault, lida diretamente do
- * {@link ConfigurableEnvironment} na fase EPP — antes de qualquer bean Spring existir.
+ * Configuração de conexão com o HashiCorp Vault, lida diretamente de um mapa plano
+ * de variáveis de ambiente — sem dependência de framework.
  *
  * <p>Cada campo usa uma cadeia de dois níveis:
  * <ol>
- *   <li>Chave de propriedade Spring (ex.: {@code env.governance.sources.vault.address}), que
- *       pode ser definida em {@code application.yml} como {@code ${VAULT_ADDR}}.</li>
+ *   <li>Chave de propriedade Spring (ex.: {@code env.governance.sources.vault.address}),
+ *       presente no mapa quando chamado via Spring Boot (adicionada pelo
+ *       {@code SpringEnvVarSourceAdapter.flattenEnvironment}).</li>
  *   <li>Variável de ambiente do S.O. como fallback direto (ex.: {@code VAULT_ADDR}).</li>
  * </ol>
  *
- * <p>Isso implementa o modelo de dois níveis do plano: parâmetros de conexão com o Vault
- * viajam via env do S.O.; segredos da aplicação viajam via Vault.
+ * <p>Para apps não-Spring, apenas o segundo nível é resolvido (variáveis do S.O.).
  *
  * @author Sartre Brasil
  * @since 1.1
@@ -47,52 +46,54 @@ public record VaultConnectionConfig(
 	}
 
 	/**
-	 * Cria uma instância lendo o ambiente no estilo dois-níveis:
+	 * Cria uma instância lendo o mapa de ambiente no estilo dois-níveis:
 	 * propriedade Spring → fallback para variável de ambiente do S.O.
 	 */
-	public static VaultConnectionConfig from(ConfigurableEnvironment env) {
+	public static VaultConnectionConfig from(Map<String, String> env) {
 		String address = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.address"),
-				env.getProperty("VAULT_ADDR"));
+				env.get("env.governance.sources.vault.address"),
+				env.get("VAULT_ADDR"));
 
 		String authMethodStr = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.auth.method"),
-				env.getProperty("VAULT_AUTH_METHOD"));
+				env.get("env.governance.sources.vault.auth.method"),
+				env.get("VAULT_AUTH_METHOD"));
 		AuthMethod authMethod = AuthMethod.parse(authMethodStr);
 
 		String token = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.auth.token"),
-				env.getProperty("VAULT_TOKEN"));
+				env.get("env.governance.sources.vault.auth.token"),
+				env.get("VAULT_TOKEN"));
 
 		String roleId = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.auth.role-id"),
-				env.getProperty("VAULT_ROLE_ID"));
+				env.get("env.governance.sources.vault.auth.role-id"),
+				env.get("VAULT_ROLE_ID"));
 
 		String secretId = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.auth.secret-id"),
-				env.getProperty("VAULT_SECRET_ID"));
+				env.get("env.governance.sources.vault.auth.secret-id"),
+				env.get("VAULT_SECRET_ID"));
 
 		String pathsProp = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.paths"),
-				env.getProperty("VAULT_PATHS"));
+				env.get("env.governance.sources.vault.paths"),
+				env.get("VAULT_PATHS"));
 		List<String> paths = pathsProp != null
 				? Arrays.stream(pathsProp.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList()
 				: List.of();
 
-		int kvVersion = env.getProperty("env.governance.sources.vault.kv-version", Integer.class,
-				parseIntOrDefault(env.getProperty("VAULT_KV_VERSION"), 2));
+		int kvVersion = parseIntOrDefault(firstNonBlank(
+				env.get("env.governance.sources.vault.kv-version"),
+				env.get("VAULT_KV_VERSION")), 2);
 
 		String namespace = firstNonBlank(
-				env.getProperty("env.governance.sources.vault.namespace"),
-				env.getProperty("VAULT_NAMESPACE"),
+				env.get("env.governance.sources.vault.namespace"),
+				env.get("VAULT_NAMESPACE"),
 				"");
 
-		int timeoutSeconds = env.getProperty("env.governance.sources.vault.timeout-seconds", Integer.class,
-				parseIntOrDefault(env.getProperty("VAULT_TIMEOUT_SECONDS"), 5));
+		int timeoutSeconds = parseIntOrDefault(firstNonBlank(
+				env.get("env.governance.sources.vault.timeout-seconds"),
+				env.get("VAULT_TIMEOUT_SECONDS")), 5);
 
 		boolean tlsSkipVerify = Boolean.parseBoolean(firstNonBlank(
-				env.getProperty("env.governance.sources.vault.tls.skip-verify"),
-				env.getProperty("VAULT_TLS_SKIP_VERIFY"),
+				env.get("env.governance.sources.vault.tls.skip-verify"),
+				env.get("VAULT_TLS_SKIP_VERIFY"),
 				"false"));
 
 		return new VaultConnectionConfig(

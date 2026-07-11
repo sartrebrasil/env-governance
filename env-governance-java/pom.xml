@@ -11,15 +11,11 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>env-governance-vault</artifactId>
-    <name>env-governance-vault</name>
-    <description>EnvVarSource para HashiCorp Vault — zero dependências de framework</description>
+    <artifactId>env-governance-java</artifactId>
+    <name>env-governance-java</name>
+    <description>SPI e entry point de governança de env vars — zero dependências de framework</description>
 
     <dependencies>
-        <dependency>
-            <groupId>com.example</groupId>
-            <artifactId>env-governance-java</artifactId>
-        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

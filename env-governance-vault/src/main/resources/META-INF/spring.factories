@@ -1,2 +1,3 @@
-com.example.envgovernance.spi.EnvVarSource=\
-com.example.envgovernance.vault.VaultEnvVarSource
+# Vault não registra mais EPPs nem EnvVarSource via spring.factories.
+# Descoberta via java.util.ServiceLoader:
+#   META-INF/services/com.example.envgovernance.spi.EnvVarSource

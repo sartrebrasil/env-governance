@@ -9,17 +9,18 @@ import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.PropertySource;
-import org.springframework.core.io.support.SpringFactoriesLoader;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.ServiceLoader;
 
 /**
- * Descobre, ordena e inicializa todas as implementações de {@link EnvVarSource} declaradas
- * via {@code spring.factories}, injetando no {@link ConfigurableEnvironment} os
- * {@link PropertySource}s retornados por cada fonte.
+ * Descobre, ordena e inicializa todas as implementações de {@link EnvVarSource} disponíveis
+ * no classpath via {@link ServiceLoader}, injetando no {@link ConfigurableEnvironment} os
+ * valores retornados por cada fonte.
  *
  * <p>Ordem {@code HIGHEST_PRECEDENCE + 18}: após o {@code DeclaredVarsScanner} (+15) e
  * antes do {@code RequiredEnvCheckEnvironmentPostProcessor} (+20), garantindo que as
@@ -37,6 +38,7 @@ import java.util.Optional;
  * @since 1.1
  * @see EnvVarSource
  * @see EnvVarSourceRegistry
+ * @see SpringEnvVarSourceAdapter
  */
 public class EnvVarSourceLoaderPostProcessor implements EnvironmentPostProcessor, Ordered {
 
@@ -55,14 +57,18 @@ public class EnvVarSourceLoaderPostProcessor implements EnvironmentPostProcessor
 				: Thread.currentThread().getContextClassLoader();
 
 		List<EnvVarSource> sources = new ArrayList<>(loadSources(classLoader));
-		sources.sort(Comparator.comparingInt(Ordered::getOrder));
+		sources.sort(Comparator.comparingInt(EnvVarSource::getOrder));
+
+		// Constrói mapa plano uma vez — inclui application.yml + S.O., suficiente para
+		// isAvailable/load de todas as fontes (ex.: VaultConnectionConfig lê VAULT_ADDR daqui)
+		Map<String, String> flatEnv = SpringEnvVarSourceAdapter.flattenEnvironment(environment);
 
 		MutablePropertySources propertySources = environment.getPropertySources();
 		// Fontes remotas são inseridas após systemEnvironment — o S.O. tem prioridade máxima
 		String insertAfterName = "systemEnvironment";
 
 		for (EnvVarSource source : sources) {
-			if (!source.isAvailable(environment)) {
+			if (!source.isAvailable(flatEnv)) {
 				log.debug("[ENV GOVERNANCE] Fonte indisponível, ignorada: " + source.name());
 				continue;
 			}
@@ -71,7 +77,8 @@ public class EnvVarSourceLoaderPostProcessor implements EnvironmentPostProcessor
 					"env.governance.sources." + source.name() + ".on-failure", "fail");
 
 			try {
-				Optional<PropertySource<?>> ps = source.load(environment);
+				Map<String, String> vars = source.load(flatEnv);
+				Optional<PropertySource<?>> ps = SpringEnvVarSourceAdapter.adapt(source, vars);
 				if (ps.isPresent()) {
 					PropertySource<?> propertySource = ps.get();
 					if (propertySources.contains(insertAfterName)) {
@@ -100,11 +107,13 @@ public class EnvVarSourceLoaderPostProcessor implements EnvironmentPostProcessor
 	}
 
 	/**
-	 * Carrega as implementações de {@link EnvVarSource} do classpath.
+	 * Carrega as implementações de {@link EnvVarSource} do classpath via {@link ServiceLoader}.
 	 * Método protegido para permitir substituição em testes sem manipulação de classloader.
 	 */
 	protected List<EnvVarSource> loadSources(ClassLoader classLoader) {
-		return SpringFactoriesLoader.loadFactories(EnvVarSource.class, classLoader);
+		return ServiceLoader.load(EnvVarSource.class, classLoader).stream()
+				.map(ServiceLoader.Provider::get)
+				.collect(java.util.stream.Collectors.toList());
 	}
 
 	@Override

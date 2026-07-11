@@ -4,14 +4,12 @@ import com.example.envgovernance.spi.EnvVarSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringApplication;
-import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.StandardEnvironment;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,7 +34,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 	// helpers
 	// -------------------------------------------------------------------------
 
-	/** Loader que retorna fontes fixas em vez de ler do spring.factories. */
+	/** Loader que retorna fontes fixas em vez de ler do ServiceLoader. */
 	private EnvVarSourceLoaderPostProcessor loaderWith(EnvVarSource... sources) {
 		return new EnvVarSourceLoaderPostProcessor() {
 			@Override
@@ -56,26 +54,24 @@ class EnvVarSourceLoaderPostProcessorTest {
 		return env;
 	}
 
-	/** Fonte disponível que não injeta PropertySource (tipo SystemEnvVarSource). */
+	/** Fonte disponível que não injeta variáveis (tipo SystemEnvVarSource). */
 	private EnvVarSource noopSource(String name, int order, Set<String> varNames) {
 		return new EnvVarSource() {
 			@Override public String name() { return name; }
-			@Override public boolean isAvailable(ConfigurableEnvironment e) { return true; }
-			@Override public Optional<PropertySource<?>> load(ConfigurableEnvironment e) { return Optional.empty(); }
+			@Override public boolean isAvailable(Map<String, String> e) { return true; }
+			@Override public Map<String, String> load(Map<String, String> e) { return Map.of(); }
 			@Override public Set<String> getVarNames() { return varNames; }
 			@Override public int getOrder() { return order; }
 		};
 	}
 
-	/** Fonte que injeta um PropertySource com as chaves fornecidas. */
-	private EnvVarSource injectingSource(String name, int order, Map<String, Object> secrets) {
+	/** Fonte que injeta variáveis no ambiente. */
+	private EnvVarSource injectingSource(String name, int order, Map<String, String> secrets) {
 		return new EnvVarSource() {
 			private final Set<String> names = Set.copyOf(secrets.keySet());
 			@Override public String name() { return name; }
-			@Override public boolean isAvailable(ConfigurableEnvironment e) { return true; }
-			@Override public Optional<PropertySource<?>> load(ConfigurableEnvironment e) {
-				return Optional.of(new MapPropertySource(name, secrets));
-			}
+			@Override public boolean isAvailable(Map<String, String> e) { return true; }
+			@Override public Map<String, String> load(Map<String, String> e) { return secrets; }
 			@Override public Set<String> getVarNames() { return names; }
 			@Override public int getOrder() { return order; }
 		};
@@ -85,8 +81,8 @@ class EnvVarSourceLoaderPostProcessorTest {
 	private EnvVarSource unavailableSource(String name) {
 		return new EnvVarSource() {
 			@Override public String name() { return name; }
-			@Override public boolean isAvailable(ConfigurableEnvironment e) { return false; }
-			@Override public Optional<PropertySource<?>> load(ConfigurableEnvironment e) { return Optional.empty(); }
+			@Override public boolean isAvailable(Map<String, String> e) { return false; }
+			@Override public Map<String, String> load(Map<String, String> e) { return Map.of(); }
 			@Override public Set<String> getVarNames() { return Set.of(); }
 			@Override public int getOrder() { return 0; }
 		};
@@ -96,8 +92,8 @@ class EnvVarSourceLoaderPostProcessorTest {
 	private EnvVarSource failingSource(String name) {
 		return new EnvVarSource() {
 			@Override public String name() { return name; }
-			@Override public boolean isAvailable(ConfigurableEnvironment e) { return true; }
-			@Override public Optional<PropertySource<?>> load(ConfigurableEnvironment e) {
+			@Override public boolean isAvailable(Map<String, String> e) { return true; }
+			@Override public Map<String, String> load(Map<String, String> e) {
 				throw new RuntimeException("conexão recusada");
 			}
 			@Override public Set<String> getVarNames() { return Set.of(); }
@@ -134,7 +130,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 	// -------------------------------------------------------------------------
 
 	@Test
-	void deveFonteComPropertySourceInjetarSegredosNoAmbiente() {
+	void deveFonteComVariaveisInjetarSegredosNoAmbiente() {
 		EnvVarSource vault = injectingSource("vault", 10, Map.of("DB_PASSWORD", "secret123"));
 		StandardEnvironment env = emptyEnv();
 
@@ -157,7 +153,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 		int systemIdx = -1, vaultIdx = -1, i = 0;
 		for (PropertySource<?> ps : env.getPropertySources()) {
 			if ("systemEnvironment".equals(ps.getName())) systemIdx = i;
-			if ("vault".equals(ps.getName())) vaultIdx = i;
+			if ("vault".equals(ps.getName()))             vaultIdx = i;
 			i++;
 		}
 		assertTrue(systemIdx < vaultIdx,
@@ -166,9 +162,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 
 	@Test
 	void deveVarDoSoSubrescreverVaultQuandoAmbosFornecem() {
-		// S.O. define MY_VAR, Vault também define MY_VAR — S.O. vence (posição mais alta)
 		StandardEnvironment env = emptyEnv();
-		// Simula a presença de MY_VAR no S.O.
 		env.getPropertySources().addFirst(
 				new MapPropertySource("systemEnvironment", Map.of("MY_VAR", "from-os")));
 
@@ -193,7 +187,6 @@ class EnvVarSourceLoaderPostProcessorTest {
 
 		List<EnvVarSource> active = EnvVarSourceRegistry.getActiveSources();
 		assertEquals(3, active.size());
-		// ordem crescente de getOrder()
 		assertEquals("fonte-b", active.get(0).name());
 		assertEquals("fonte-c", active.get(1).name());
 		assertEquals("fonte-a", active.get(2).name());
@@ -211,7 +204,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 	}
 
 	@Test
-	void deveAtribuicaoFirstWinsParaVarPresemteEmMultiplasFontes() {
+	void deveAtribuicaoFirstWinsParaVarPresenteEmMultiplasFontes() {
 		EnvVarSource s1 = noopSource("system-env", 0,  Set.of("SHARED_VAR"));
 		EnvVarSource s2 = noopSource("vault",      10, Set.of("SHARED_VAR"));
 
@@ -227,8 +220,7 @@ class EnvVarSourceLoaderPostProcessorTest {
 	// -------------------------------------------------------------------------
 
 	@Test
-	void deveOnFailureFallPadraolLancarEnvVarSourceLoadException() {
-		// on-failure default = "fail" → deve lançar EnvVarSourceLoadException
+	void deveOnFailureFallPadraoLancarEnvVarSourceLoadException() {
 		EnvVarSource failing = failingSource("vault");
 
 		assertThrows(EnvVarSourceLoadException.class,
@@ -242,7 +234,6 @@ class EnvVarSourceLoaderPostProcessorTest {
 
 		assertDoesNotThrow(() -> loaderWith(failing).postProcessEnvironment(env, new SpringApplication()));
 
-		// Fonte é registrada, mas com varNames vazio (load() falhou antes de popular)
 		List<EnvVarSource> active = EnvVarSourceRegistry.getActiveSources();
 		assertEquals(1, active.size());
 		assertEquals("vault", active.get(0).name());

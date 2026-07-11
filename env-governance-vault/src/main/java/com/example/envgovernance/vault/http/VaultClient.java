@@ -1,9 +1,6 @@
 package com.example.envgovernance.vault.http;
 
 import com.example.envgovernance.vault.VaultConnectionConfig;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.springframework.boot.json.JsonParserFactory;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -19,11 +16,11 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Map;
+import java.util.logging.Logger;
 
 /**
- * Cliente HTTP para o HashiCorp Vault, usando exclusivamente {@link java.net.http.HttpClient}
- * (Java 21) e o {@link org.springframework.boot.json.JsonParser} embutido do Spring Boot.
- * Nenhuma dependência externa é necessária além de {@code spring-boot}.
+ * Cliente HTTP para o HashiCorp Vault usando exclusivamente APIs do JDK 21
+ * ({@link java.net.http.HttpClient} e {@link VaultJsonParser}) — zero dependências externas.
  *
  * <p>Suporta:
  * <ul>
@@ -38,16 +35,14 @@ import java.util.Map;
  */
 public final class VaultClient {
 
-	private static final Log log = LogFactory.getLog(VaultClient.class);
+	private static final Logger log = Logger.getLogger(VaultClient.class.getName());
 
 	private final VaultConnectionConfig config;
 	private final HttpClient httpClient;
-	private final org.springframework.boot.json.JsonParser jsonParser;
 
 	public VaultClient(VaultConnectionConfig config) {
 		this.config = config;
 		this.httpClient = buildHttpClient(config);
-		this.jsonParser = JsonParserFactory.getJsonParser();
 	}
 
 	/**
@@ -57,7 +52,7 @@ public final class VaultClient {
 	 * @param path caminho no Vault (ex.: {@code secret/myapp})
 	 * @return mapa plano {@code chave → valor} dos segredos encontrados
 	 */
-	public Map<String, Object> readSecrets(String path) {
+	public Map<String, String> readSecrets(String path) {
 		String token = authenticate();
 		String apiPath = buildApiPath(path);
 		String url = config.address().stripTrailing() + "/v1/" + apiPath;
@@ -125,41 +120,22 @@ public final class VaultClient {
 					"AppRole login falhou com HTTP " + response.statusCode());
 		}
 
-		Map<String, Object> parsed = jsonParser.parseMap(response.body());
-		Object auth = parsed.get("auth");
-		if (!(auth instanceof Map<?, ?> authMap)) {
-			throw new VaultClientException("Resposta AppRole inválida: campo 'auth' ausente ou inválido");
-		}
-		Object clientToken = authMap.get("client_token");
-		if (!(clientToken instanceof String tokenStr) || tokenStr.isBlank()) {
+		String clientToken = VaultJsonParser.extractString(response.body(), "auth", "client_token");
+		if (clientToken == null || clientToken.isBlank()) {
 			throw new VaultClientException("Resposta AppRole inválida: 'auth.client_token' ausente");
 		}
-		return tokenStr;
+		return clientToken;
 	}
 
 	// -------------------------------------------------------------------------
 	// parsing de resposta
 	// -------------------------------------------------------------------------
 
-	@SuppressWarnings("unchecked")
-	private Map<String, Object> extractSecrets(String body) {
-		Map<String, Object> response = jsonParser.parseMap(body);
-		Object data = response.get("data");
-		if (!(data instanceof Map<?, ?> dataMap)) {
-			return Map.of();
-		}
-
+	private Map<String, String> extractSecrets(String body) {
 		if (config.kvVersion() == 2) {
-			// KV v2: response.data.data
-			Object innerData = dataMap.get("data");
-			if (innerData instanceof Map<?, ?> innerMap) {
-				return (Map<String, Object>) innerMap;
-			}
-			return Map.of();
+			return VaultJsonParser.extractNestedObject(body, "data", "data");
 		}
-
-		// KV v1: response.data
-		return (Map<String, Object>) dataMap;
+		return VaultJsonParser.extractNestedObject(body, "data");
 	}
 
 	// -------------------------------------------------------------------------
@@ -181,7 +157,7 @@ public final class VaultClient {
 		String mount = userPath.substring(0, slash);
 		String rest = userPath.substring(slash + 1);
 		if (rest.startsWith("data/") || rest.equals("data")) {
-			return userPath; // usuário já incluiu /data/
+			return userPath;
 		}
 		return mount + "/data/" + rest;
 	}
@@ -203,7 +179,7 @@ public final class VaultClient {
 				.followRedirects(HttpClient.Redirect.NEVER);
 
 		if (config.tlsSkipVerify()) {
-			log.warn("[ENV GOVERNANCE] Vault TLS verification desabilitada (tls.skip-verify=true) — NÃO usar em produção!");
+			log.warning("[ENV GOVERNANCE] Vault TLS verification desabilitada (tls.skip-verify=true) — NÃO usar em produção!");
 			builder.sslContext(createTrustAllSslContext());
 		}
 

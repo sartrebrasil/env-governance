@@ -23,6 +23,7 @@
     </properties>
 
     <modules>
+        <module>env-governance-java</module>
         <module>env-governance-core</module>
         <module>env-governance-autoconfigure</module>
         <module>env-governance-starter</module>
@@ -32,6 +33,11 @@
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>com.example</groupId>
+                <artifactId>env-governance-java</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.example</groupId>
                 <artifactId>env-governance-core</artifactId>

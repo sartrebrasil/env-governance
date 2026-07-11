@@ -2,33 +2,22 @@ package com.example.envgovernance.vault;
 
 import com.example.envgovernance.spi.EnvVarSource;
 import com.example.envgovernance.vault.http.VaultClient;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.springframework.core.env.ConfigurableEnvironment;
-import org.springframework.core.env.MapPropertySource;
-import org.springframework.core.env.PropertySource;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /**
- * {@link EnvVarSource} que lê segredos do HashiCorp Vault na fase EPP, antes de qualquer
- * bean Spring ser criado.
- *
- * <p>Após um {@code load()} bem-sucedido, injeta um {@link MapPropertySource} no
- * {@link ConfigurableEnvironment} imediatamente após {@code "systemEnvironment"}, fazendo
- * com que os segredos do Vault sejam resolvidos por toda a camada Spring — inclusive pelo
- * {@code RequiredEnvCheckEnvironmentPostProcessor} que valida variáveis obrigatórias.
- *
- * <p>Para múltiplos caminhos ({@code paths}), a primeira ocorrência de uma chave vence
+ * {@link EnvVarSource} que lê segredos do HashiCorp Vault, sem dependências de framework.
+ * <p>
+ * Para múltiplos caminhos ({@code paths}), a primeira ocorrência de uma chave vence
  * ({@code putIfAbsent}): o caminho mais específico deve ser listado primeiro.
- *
- * <p>Todos os segredos do Vault são tratados como sensíveis ({@link #isSensitive} retorna
+ * <p>
+ * Todos os segredos do Vault são tratados como sensíveis ({@link #isSensitive} retorna
  * {@code true} para qualquer chave).
  *
- * <h3>Configuração mínima</h3>
+ * <h3>Configuração mínima (Spring Boot)</h3>
  * <pre>{@code
  * env:
  *   governance:
@@ -42,6 +31,13 @@ import java.util.Set;
  *           - secret/myapp
  * }</pre>
  *
+ * <h3>Configuração mínima (não-Spring)</h3>
+ * <pre>{@code
+ * VAULT_ADDR=https://vault.example.com
+ * VAULT_TOKEN=hvs.xxx
+ * VAULT_PATHS=secret/myapp
+ * }</pre>
+ *
  * @author Sartre Brasil
  * @since 1.1
  * @see VaultConnectionConfig
@@ -49,7 +45,7 @@ import java.util.Set;
  */
 public final class VaultEnvVarSource implements EnvVarSource {
 
-	private static final Log log = LogFactory.getLog(VaultEnvVarSource.class);
+	private static final Logger log = Logger.getLogger(VaultEnvVarSource.class.getName());
 
 	private volatile Set<String> varNames = Set.of();
 	private volatile String resolvedName = "vault";
@@ -60,33 +56,31 @@ public final class VaultEnvVarSource implements EnvVarSource {
 	}
 
 	@Override
-	public boolean isAvailable(ConfigurableEnvironment environment) {
-		// Mínimo necessário: endereço do Vault e ao menos um caminho configurado
+	public boolean isAvailable(Map<String, String> environment) {
 		VaultConnectionConfig config = VaultConnectionConfig.from(environment);
 		return config.address() != null && !config.address().isBlank()
 				&& !config.paths().isEmpty();
 	}
 
 	@Override
-	public Optional<PropertySource<?>> load(ConfigurableEnvironment environment) {
+	public Map<String, String> load(Map<String, String> environment) {
 		VaultConnectionConfig config = VaultConnectionConfig.from(environment);
 		VaultClient client = new VaultClient(config);
 
-		Map<String, Object> allSecrets = new LinkedHashMap<>();
+		Map<String, String> allSecrets = new LinkedHashMap<>();
 		for (String path : config.paths()) {
-			log.debug("[ENV GOVERNANCE] Lendo segredos do Vault: " + path);
-			Map<String, Object> secrets = client.readSecrets(path);
+			log.fine("[ENV GOVERNANCE] Lendo segredos do Vault: " + path);
+			Map<String, String> secrets = client.readSecrets(path);
 			secrets.forEach(allSecrets::putIfAbsent); // primeiro caminho vence
 		}
 
-		String psName = "vault:" + String.join(",", config.paths());
-		this.resolvedName = psName;
+		this.resolvedName = "vault:" + String.join(",", config.paths());
 		this.varNames = Set.copyOf(allSecrets.keySet());
 
-		log.debug("[ENV GOVERNANCE] Vault carregou " + allSecrets.size()
+		log.fine("[ENV GOVERNANCE] Vault carregou " + allSecrets.size()
 				+ " segredos de " + config.paths().size() + " caminho(s)");
 
-		return Optional.of(new MapPropertySource(psName, allSecrets));
+		return Map.copyOf(allSecrets);
 	}
 
 	@Override

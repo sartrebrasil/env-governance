@@ -84,7 +84,8 @@ public class RequiredEnvCheckEnvironmentPostProcessor implements EnvironmentPost
 				detail,
 				"=".repeat(57));
 
-		throw new MissingRequiredEnvironmentVariablesException(message, missing);
+		throw new MissingRequiredEnvironmentVariablesException(message,
+				missing.stream().map(DeclaredVarsRegistry.DeclaredVar::envVarName).toList());
 	}
 
 	private boolean isActive(ConfigurableEnvironment environment) {
