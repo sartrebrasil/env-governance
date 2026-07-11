@@ -26,6 +26,8 @@
         <module>env-governance-core</module>
         <module>env-governance-autoconfigure</module>
         <module>env-governance-starter</module>
+        <module>env-governance-vault</module>
+        <module>env-governance-vault-starter</module>
     </modules>
 
     <dependencyManagement>
@@ -43,6 +45,16 @@
             <dependency>
                 <groupId>com.example</groupId>
                 <artifactId>env-governance-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.example</groupId>
+                <artifactId>env-governance-vault</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.example</groupId>
+                <artifactId>env-governance-vault-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

@@ -1,0 +1,2 @@
+com.example.envgovernance.spi.EnvVarSource=\
+com.example.envgovernance.vault.VaultEnvVarSource

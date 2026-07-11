@@ -1,6 +1,8 @@
 package com.example.envgovernance.autoconfigure;
 
 import com.example.envgovernance.DeclaredVarsRegistry;
+import com.example.envgovernance.source.EnvVarSourceRegistry;
+import com.example.envgovernance.spi.EnvVarSource;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
@@ -15,12 +17,13 @@ import java.util.stream.Collectors;
  *
  * <p>Resposta:
  * <ul>
- *   <li>{@code gaps.required}   — placeholders obrigatórios ausentes no SO (erro crítico)</li>
- *   <li>{@code gaps.fallback}   — placeholders com default ausentes no SO (usando fallback)</li>
+ *   <li>{@code gaps.required}   — placeholders obrigatórios ausentes em todas as fontes</li>
+ *   <li>{@code gaps.fallback}   — placeholders com default ausentes (usando fallback)</li>
  *   <li>{@code gaps.noValue}    — propriedades sem valor no YAML e sem var de ambiente</li>
- *   <li>{@code unused}          — vars do SO sem correspondência em nenhuma propriedade</li>
+ *   <li>{@code unused}          — vars sem correspondência em nenhuma propriedade (com fonte de origem)</li>
  *   <li>{@code applicationVars} — todas as variáveis potenciais (diagnóstico completo)</li>
- *   <li>{@code activeOverrides} — vars do SO que estão sobrescrevendo propriedades</li>
+ *   <li>{@code activeOverrides} — vars que estão sobrescrevendo propriedades (com fonte de origem)</li>
+ *   <li>{@code sources}         — resumo das fontes ativas (nome, quantidade de vars, prioridade)</li>
  * </ul>
  *
  * <p>Para expor, adicione ao seu {@code application.yml}:
@@ -34,6 +37,7 @@ import java.util.stream.Collectors;
  *
  * @author Sartre Brasil
  * @since 1.0
+ * @see EnvVarSourceRegistry
  */
 @Endpoint(id = "env-governance")
 public class EnvGovernanceEndpoint {
@@ -41,15 +45,20 @@ public class EnvGovernanceEndpoint {
 	@ReadOperation
 	public Map<String, Object> report() {
 		Map<String, DeclaredVarsRegistry.DeclaredVar> declared = DeclaredVarsRegistry.getAll();
-		Set<String> osEnv = System.getenv().keySet();
+		Map<String, String> attributions = EnvVarSourceRegistry.getVarAttributions();
+		Set<String> allEnvVarNames = attributions.keySet();
+
+		Set<String> allEnvNormalized = allEnvVarNames.stream()
+				.map(EnvVarNormalizer::normalize)
+				.collect(Collectors.toSet());
 		Set<String> declaredNormalized = declared.keySet().stream()
-				.map(this::normalize)
+				.map(EnvVarNormalizer::normalize)
 				.collect(Collectors.toSet());
 
 		// gaps: [REQUIRED]
 		List<Map<String, String>> required = declared.values().stream()
 				.filter(v -> v.explicit() && !v.hasDefault())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.map(v -> Map.of("name", v.envVarName(), "propertyKey", v.propertyKey(), "sourceFile", v.sourceFile()))
 				.toList();
@@ -57,7 +66,7 @@ public class EnvGovernanceEndpoint {
 		// gaps: [FALLBACK]
 		List<Map<String, String>> fallback = declared.values().stream()
 				.filter(v -> v.explicit() && v.hasDefault())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.map(v -> Map.of("name", v.envVarName(), "propertyKey", v.propertyKey(), "sourceFile", v.sourceFile()))
 				.toList();
@@ -65,15 +74,16 @@ public class EnvGovernanceEndpoint {
 		// gaps: [NO VALUE]
 		List<Map<String, String>> noValue = declared.values().stream()
 				.filter(v -> !v.explicit() && !v.hasYamlValue())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.map(v -> Map.of("name", v.envVarName(), "propertyKey", v.propertyKey(), "sourceFile", v.sourceFile()))
 				.toList();
 
-		// vars do SO sem correspondência
-		List<String> unused = osEnv.stream()
-				.filter(k -> !declaredNormalized.contains(normalize(k)))
+		// vars sem correspondência — com fonte de origem
+		List<Map<String, String>> unused = allEnvVarNames.stream()
+				.filter(k -> !declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
+				.map(k -> Map.of("name", k, "source", attributions.getOrDefault(k, "?")))
 				.toList();
 
 		// diagnóstico completo
@@ -92,34 +102,46 @@ public class EnvGovernanceEndpoint {
 				})
 				.toList();
 
-		List<Map<String, String>> activeOverrides = osEnv.stream()
-				.filter(k -> declaredNormalized.contains(normalize(k)))
+		// substituições ativas — com fonte de origem
+		List<Map<String, Object>> activeOverrides = allEnvVarNames.stream()
+				.filter(k -> declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
 				.map(k -> {
 					DeclaredVarsRegistry.DeclaredVar matched = findByNormalized(declared, k);
-					return matched != null
-							? Map.of("envVar", k, "propertyKey", matched.propertyKey(), "sourceFile", matched.sourceFile())
-							: Map.of("envVar", k);
+					String source = attributions.getOrDefault(k, "?");
+					if (matched != null) {
+						return Map.<String, Object>of(
+								"envVar", k,
+								"propertyKey", matched.propertyKey(),
+								"sourceFile", matched.sourceFile(),
+								"source", source);
+					}
+					return Map.<String, Object>of("envVar", k, "source", source);
 				})
+				.toList();
+
+		// resumo das fontes ativas
+		List<Map<String, Object>> sources = EnvVarSourceRegistry.getActiveSources().stream()
+				.map(s -> Map.<String, Object>of(
+						"name", s.name(),
+						"varCount", s.getVarNames().size(),
+						"priority", s.getOrder()))
 				.toList();
 
 		return Map.of(
 				"gaps",            Map.of("required", required, "fallback", fallback, "noValue", noValue),
 				"unused",          unused,
 				"applicationVars", applicationVars,
-				"activeOverrides", activeOverrides
+				"activeOverrides", activeOverrides,
+				"sources",         sources
 		);
 	}
 
-	private String normalize(String key) {
-		return key.toUpperCase().replace('-', '_').replace('.', '_');
-	}
-
 	private DeclaredVarsRegistry.DeclaredVar findByNormalized(
-			Map<String, DeclaredVarsRegistry.DeclaredVar> declared, String osVar) {
-		String norm = normalize(osVar);
+			Map<String, DeclaredVarsRegistry.DeclaredVar> declared, String envVar) {
+		String norm = EnvVarNormalizer.normalize(envVar);
 		return declared.values().stream()
-				.filter(v -> normalize(v.envVarName()).equals(norm))
+				.filter(v -> EnvVarNormalizer.normalize(v.envVarName()).equals(norm))
 				.findFirst()
 				.orElse(null);
 	}
