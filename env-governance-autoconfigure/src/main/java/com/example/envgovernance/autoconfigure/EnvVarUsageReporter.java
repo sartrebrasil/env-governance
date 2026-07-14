@@ -1,6 +1,7 @@
 package com.example.envgovernance.autoconfigure;
 
 import com.example.envgovernance.DeclaredVarsRegistry;
+import com.example.envgovernance.source.EnvVarSourceRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -12,26 +13,30 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Produz um diagnóstico de variáveis de ambiente no {@link ApplicationReadyEvent} em dois níveis:
+ * Produz um diagnóstico de variáveis de ambiente no {@link ApplicationReadyEvent} em dois níveis.
  *
  * <h3>INFO — gaps acionáveis</h3>
  * <ul>
- *   <li>{@code [REQUIRED]} — placeholder {@code ${VAR}} sem default, {@code VAR} ausente no SO/container</li>
+ *   <li>{@code [REQUIRED]} — placeholder {@code ${VAR}} sem default, {@code VAR} ausente em todas as fontes</li>
  *   <li>{@code [FALLBACK]}  — placeholder {@code ${VAR:default}}, {@code VAR} ausente (usando fallback)</li>
- *   <li>{@code [NO VALUE]}  — propriedade sem valor no YAML e sem variável de ambiente correspondente</li>
- *   <li>{@code [UNUSED]}    — variáveis do SO/container sem correspondência em nenhuma propriedade</li>
+ *   <li>{@code [NO VALUE]}  — propriedade sem valor no YAML e sem variável correspondente em nenhuma fonte</li>
+ *   <li>{@code [UNUSED]}    — variáveis de ambiente sem correspondência em nenhuma propriedade</li>
  * </ul>
  *
  * <h3>DEBUG — diagnóstico completo</h3>
  * <ul>
  *   <li>{@code [APPLICATION]} — todas as variáveis potenciais (chave + placeholders explícitos)</li>
- *   <li>{@code [ENVIRONMENT]} — todas as variáveis do SO/container</li>
- *   <li>{@code [ACTIVE]}      — variáveis do SO que estão sobrescrevendo propriedades da aplicação</li>
- *   <li>{@code [UNUSED]}      — variáveis do SO sem correspondência (mesma lista do INFO)</li>
+ *   <li>{@code [ENVIRONMENT]} — todas as variáveis de todas as fontes ativas</li>
+ *   <li>{@code [ACTIVE]}      — variáveis que estão sobrescrevendo propriedades da aplicação</li>
+ *   <li>{@code [UNUSED]}      — variáveis sem correspondência (mesma lista do INFO)</li>
  * </ul>
+ *
+ * <p>Cada linha de diagnóstico indica a fonte de origem da variável, ex.:
+ * {@code DB_PASSWORD  →  spring.datasource.password  [application.yml]  <vault[secret/data/myapp]>}
  *
  * @author Sartre Brasil
  * @since 1.0
+ * @see EnvVarSourceRegistry
  */
 public class EnvVarUsageReporter implements ApplicationListener<ApplicationReadyEvent> {
 
@@ -50,16 +55,22 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 		}
 
 		Map<String, DeclaredVarsRegistry.DeclaredVar> declared = DeclaredVarsRegistry.getAll();
-		Set<String> osEnv = System.getenv().keySet();
+		// varName → sourceName (first-wins por prioridade)
+		Map<String, String> attributions = EnvVarSourceRegistry.getVarAttributions();
+		Set<String> allEnvVarNames = attributions.keySet();
+
+		Set<String> allEnvNormalized = allEnvVarNames.stream()
+				.map(EnvVarNormalizer::normalize)
+				.collect(Collectors.toSet());
 		Set<String> declaredNormalized = declared.keySet().stream()
-				.map(this::normalize)
+				.map(EnvVarNormalizer::normalize)
 				.collect(Collectors.toSet());
 
 		if (log.isDebugEnabled()) {
-			logDebug(declared, osEnv, declaredNormalized);
+			logDebug(declared, attributions, allEnvVarNames, allEnvNormalized, declaredNormalized);
 		}
 
-		logInfo(declared, osEnv, declaredNormalized);
+		logInfo(declared, attributions, allEnvNormalized, allEnvVarNames, declaredNormalized);
 	}
 
 	// -------------------------------------------------------------------------
@@ -67,32 +78,35 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 	// -------------------------------------------------------------------------
 
 	private void logInfo(Map<String, DeclaredVarsRegistry.DeclaredVar> declared,
-			Set<String> osEnv, Set<String> declaredNormalized) {
+			Map<String, String> attributions,
+			Set<String> allEnvNormalized,
+			Set<String> allEnvVarNames,
+			Set<String> declaredNormalized) {
 
-		// [REQUIRED] placeholder sem default, var ausente no SO
+		// [REQUIRED] placeholder sem default, var ausente em todas as fontes
 		List<DeclaredVarsRegistry.DeclaredVar> required = declared.values().stream()
 				.filter(v -> v.explicit() && !v.hasDefault())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.toList();
 
-		// [FALLBACK] placeholder com default, var ausente no SO (usando valor de fallback)
+		// [FALLBACK] placeholder com default, var ausente (usando valor de fallback)
 		List<DeclaredVarsRegistry.DeclaredVar> fallback = declared.values().stream()
 				.filter(v -> v.explicit() && v.hasDefault())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.toList();
 
-		// [NO VALUE] var key-derived sem valor no YAML e sem var de ambiente correspondente
+		// [NO VALUE] var key-derived sem valor no YAML e sem var correspondente em nenhuma fonte
 		List<DeclaredVarsRegistry.DeclaredVar> noValue = declared.values().stream()
 				.filter(v -> !v.explicit() && !v.hasYamlValue())
-				.filter(v -> osEnv.stream().noneMatch(k -> normalize(k).equals(normalize(v.envVarName()))))
+				.filter(v -> !allEnvNormalized.contains(EnvVarNormalizer.normalize(v.envVarName())))
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.toList();
 
-		// [UNUSED] vars do SO sem correspondência em nenhuma propriedade da aplicação
-		List<String> unused = osEnv.stream()
-				.filter(k -> !declaredNormalized.contains(normalize(k)))
+		// [UNUSED] vars sem correspondência em nenhuma propriedade da aplicação
+		List<String> unused = allEnvVarNames.stream()
+				.filter(k -> !declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
 				.toList();
 
@@ -107,21 +121,24 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 		log.info("===== ENV GOVERNANCE: GAPS DE CONFIGURAÇÃO =====");
 
 		if (!required.isEmpty()) {
-			log.error("[REQUIRED] Variáveis obrigatórias ausentes no SO/container ({}):", required.size());
+			log.error("[REQUIRED] Variáveis obrigatórias ausentes em todas as fontes ({}):", required.size());
 			required.forEach(v ->
-					log.error("  {}  →  {}  [{}]", padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
+					log.error("  {}  →  {}  [{}]",
+							padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
 		}
 
 		if (!fallback.isEmpty()) {
-			log.warn("[FALLBACK] Variáveis ausentes no SO/container, usando valor padrão ({}):", fallback.size());
+			log.warn("[FALLBACK] Variáveis ausentes em todas as fontes, usando valor padrão ({}):", fallback.size());
 			fallback.forEach(v ->
-					log.warn("  {}  →  {}  [{}]", padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
+					log.warn("  {}  →  {}  [{}]",
+							padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
 		}
 
 		if (!noValue.isEmpty()) {
-			log.warn("[NO VALUE] Propriedades sem valor no YAML e sem variável de ambiente ({}):", noValue.size());
+			log.warn("[NO VALUE] Propriedades sem valor no YAML e sem variável em nenhuma fonte ({}):", noValue.size());
 			noValue.forEach(v ->
-					log.warn("  {}  →  {}  [{}]", padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
+					log.warn("  {}  →  {}  [{}]",
+							padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
 		}
 
 		if (hasUnused) {
@@ -130,9 +147,9 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 			String suffix = unused.size() > limit
 					? " (mostrando primeiras " + limit + " de " + unused.size() + ")"
 					: "";
-			log.warn("[UNUSED] Variáveis do SO/container não utilizadas pela aplicação ({}){}:",
-					unused.size(), suffix);
-			reported.forEach(k -> log.warn("  {}", k));
+			log.warn("[UNUSED] Variáveis sem correspondência na aplicação ({}){}:", unused.size(), suffix);
+			reported.forEach(k ->
+					log.warn("  {}  <{}>", padRight(k, 45), attributions.getOrDefault(k, "?")));
 		}
 
 		log.info("=================================================");
@@ -143,19 +160,22 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 	// -------------------------------------------------------------------------
 
 	private void logDebug(Map<String, DeclaredVarsRegistry.DeclaredVar> declared,
-			Set<String> osEnv, Set<String> declaredNormalized) {
+			Map<String, String> attributions,
+			Set<String> allEnvVarNames,
+			Set<String> allEnvNormalized,
+			Set<String> declaredNormalized) {
 
 		List<DeclaredVarsRegistry.DeclaredVar> appVars = declared.values().stream()
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.toList();
 
-		List<String> activeOverrides = osEnv.stream()
-				.filter(k -> declaredNormalized.contains(normalize(k)))
+		List<String> activeOverrides = allEnvVarNames.stream()
+				.filter(k -> declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
 				.toList();
 
-		List<String> unused = osEnv.stream()
-				.filter(k -> !declaredNormalized.contains(normalize(k)))
+		List<String> unused = allEnvVarNames.stream()
+				.filter(k -> !declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
 				.toList();
 
@@ -174,35 +194,38 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 			});
 		}
 
-		log.debug("[ENVIRONMENT] Variáveis definidas no SO/container ({} var(s)):", osEnv.size());
-		osEnv.stream().sorted().forEach(k -> log.debug("  {}", k));
+		log.debug("[ENVIRONMENT] Variáveis de todas as fontes ativas ({} var(s)):", allEnvVarNames.size());
+		allEnvVarNames.stream().sorted().forEach(k ->
+				log.debug("  {}  <{}>", padRight(k, 45), attributions.getOrDefault(k, "?")));
 
-		log.debug("[ACTIVE] Substituições ativas: SO sobrescrevendo propriedades da aplicação ({} var(s)):",
+		log.debug("[ACTIVE] Substituições ativas: fontes sobrescrevendo propriedades da aplicação ({} var(s)):",
 				activeOverrides.size());
 		if (activeOverrides.isEmpty()) {
 			log.debug("  (nenhuma)");
 		} else {
 			activeOverrides.forEach(k -> {
 				DeclaredVarsRegistry.DeclaredVar matched = findByNormalized(declared, k);
+				String source = attributions.getOrDefault(k, "?");
 				if (matched != null) {
-					log.debug("  {}  →  {}  [{}]", padRight(k, 45), matched.propertyKey(), matched.sourceFile());
+					log.debug("  {}  →  {}  [{}]  <{}>",
+							padRight(k, 45), matched.propertyKey(), matched.sourceFile(), source);
 				} else {
-					log.debug("  {}", k);
+					log.debug("  {}  <{}>", padRight(k, 45), source);
 				}
 			});
 		}
 
-		log.debug("[UNUSED] Variáveis do SO não utilizadas pela aplicação ({} var(s)):", unused.size());
+		log.debug("[UNUSED] Variáveis sem correspondência na aplicação ({} var(s)):", unused.size());
 		if (unused.isEmpty()) {
 			log.debug("  (nenhuma)");
 		} else {
 			int limit = properties.orphanReportLimit();
 			List<String> reported = unused.size() > limit ? unused.subList(0, limit) : unused;
-			String suffix = unused.size() > limit
-					? " (mostrando primeiras " + limit + " de " + unused.size() + ")"
-					: "";
-			if (!suffix.isEmpty()) log.debug("  {}", suffix.trim());
-			reported.forEach(k -> log.debug("  {}", k));
+			if (unused.size() > limit) {
+				log.debug("  (mostrando primeiras {} de {})", limit, unused.size());
+			}
+			reported.forEach(k ->
+					log.debug("  {}  <{}>", padRight(k, 45), attributions.getOrDefault(k, "?")));
 		}
 
 		log.debug("==========================================================");
@@ -212,15 +235,11 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 	// helpers
 	// -------------------------------------------------------------------------
 
-	private String normalize(String key) {
-		return key.toUpperCase().replace('-', '_').replace('.', '_');
-	}
-
 	private DeclaredVarsRegistry.DeclaredVar findByNormalized(
-			Map<String, DeclaredVarsRegistry.DeclaredVar> declared, String osVar) {
-		String norm = normalize(osVar);
+			Map<String, DeclaredVarsRegistry.DeclaredVar> declared, String envVar) {
+		String norm = EnvVarNormalizer.normalize(envVar);
 		return declared.values().stream()
-				.filter(v -> normalize(v.envVarName()).equals(norm))
+				.filter(v -> EnvVarNormalizer.normalize(v.envVarName()).equals(norm))
 				.findFirst()
 				.orElse(null);
 	}

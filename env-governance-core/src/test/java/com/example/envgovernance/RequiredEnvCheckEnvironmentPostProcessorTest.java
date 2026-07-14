@@ -57,8 +57,8 @@ class RequiredEnvCheckEnvironmentPostProcessorTest {
 				() -> processor.postProcessEnvironment(new StandardEnvironment(), new SpringApplication()));
 
 		assertTrue(ex.getMessage().contains("DB_PASSWORD"));
-		assertEquals(1, ex.getMissingVars().size());
-		assertEquals("DB_PASSWORD", ex.getMissingVars().get(0).envVarName());
+		assertEquals(1, ex.getMissingVarNames().size());
+		assertEquals("DB_PASSWORD", ex.getMissingVarNames().get(0));
 	}
 
 	@Test
@@ -72,7 +72,7 @@ class RequiredEnvCheckEnvironmentPostProcessorTest {
 
 		assertTrue(ex.getMessage().contains("VAR_A"));
 		assertTrue(ex.getMessage().contains("VAR_B"));
-		assertEquals(2, ex.getMissingVars().size());
+		assertEquals(2, ex.getMissingVarNames().size());
 	}
 
 	// -------------------------------------------------------------------------

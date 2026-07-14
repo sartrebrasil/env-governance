@@ -11,23 +11,18 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>env-governance-core</artifactId>
-    <name>env-governance-core</name>
-    <description>Core scanning and registry for env-governance — EnvironmentPostProcessors e registries estáticos</description>
+    <artifactId>env-governance-vault-starter</artifactId>
+    <name>env-governance-vault-starter</name>
+    <description>Spring Boot starter para env-governance com suporte ao HashiCorp Vault — adicione esta dependência para habilitar leitura de segredos via Vault</description>
 
     <dependencies>
         <dependency>
             <groupId>com.example</groupId>
-            <artifactId>env-governance-java</artifactId>
+            <artifactId>env-governance-starter</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
+            <groupId>com.example</groupId>
+            <artifactId>env-governance-vault</artifactId>
         </dependency>
     </dependencies>
 </project>
