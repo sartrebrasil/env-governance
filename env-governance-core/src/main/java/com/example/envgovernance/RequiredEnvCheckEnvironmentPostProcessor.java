@@ -1,12 +1,15 @@
 package com.example.envgovernance;
 
+import com.example.envgovernance.source.SpringEnvVarSourceAdapter;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -62,30 +65,51 @@ public class RequiredEnvCheckEnvironmentPostProcessor implements EnvironmentPost
 			return;
 		}
 
-		List<DeclaredVarsRegistry.DeclaredVar> missing = DeclaredVarsRegistry.getAll().values().stream()
+		List<DeclaredVarsRegistry.DeclaredVar> missingDeclared = DeclaredVarsRegistry.getAll().values().stream()
 				.filter(v -> v.explicit() && !v.hasDefault())
 				.filter(v -> !environment.containsProperty(v.envVarName()))
 				.sorted(Comparator.comparing(DeclaredVarsRegistry.DeclaredVar::envVarName))
 				.toList();
 
-		if (missing.isEmpty()) {
+		// Nomes de vars exigidos pelo contrato declarativo que não estão no ambiente
+		// e ainda não foram cobertos pelos DeclaredVars acima (evita duplicatas na mensagem)
+		Map<String, String> flatEnv = SpringEnvVarSourceAdapter.flattenEnvironment(environment);
+		java.util.Set<String> declaredNames = missingDeclared.stream()
+				.map(DeclaredVarsRegistry.DeclaredVar::envVarName)
+				.collect(java.util.stream.Collectors.toSet());
+		List<String> missingContract = ContractRegistry.getContract()
+				.effectiveRequiredNames(flatEnv).stream()
+				.filter(name -> !environment.containsProperty(name))
+				.filter(name -> !declaredNames.contains(name))
+				.sorted()
+				.toList();
+
+		if (missingDeclared.isEmpty() && missingContract.isEmpty()) {
 			return;
 		}
 
-		String detail = missing.stream()
-				.map(v -> String.format("  %-45s → %s  [%s]",
-						v.envVarName(), v.propertyKey(), v.sourceFile()))
-				.collect(Collectors.joining("\n"));
+		List<String> detailLines = new ArrayList<>();
+		missingDeclared.forEach(v -> detailLines.add(
+				String.format("  %-45s → %s  [%s]", v.envVarName(), v.propertyKey(), v.sourceFile())));
+		missingContract.forEach(name -> detailLines.add(
+				String.format("  %-45s → (contrato declarativo)", name)));
+
+		int totalCount = missingDeclared.size() + missingContract.size();
+		String detail = String.join("\n", detailLines);
 
 		String message = String.format(
 				"%n===== ENV GOVERNANCE: VARIÁVEIS OBRIGATÓRIAS AUSENTES (%d) =====%n%s%n%s%n"
 				+ "Defina as variáveis acima no ambiente antes de iniciar a aplicação.",
-				missing.size(),
+				totalCount,
 				detail,
 				"=".repeat(57));
 
-		throw new MissingRequiredEnvironmentVariablesException(message,
-				missing.stream().map(DeclaredVarsRegistry.DeclaredVar::envVarName).toList());
+		List<String> allMissingNames = new ArrayList<>(
+				missingDeclared.stream().map(DeclaredVarsRegistry.DeclaredVar::envVarName).toList());
+		allMissingNames.addAll(missingContract);
+		allMissingNames.sort(Comparator.naturalOrder());
+
+		throw new MissingRequiredEnvironmentVariablesException(message, allMissingNames);
 	}
 
 	private boolean isActive(ConfigurableEnvironment environment) {

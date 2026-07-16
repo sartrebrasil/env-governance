@@ -1,12 +1,15 @@
 package com.example.envgovernance.autoconfigure;
 
+import com.example.envgovernance.ContractRegistry;
 import com.example.envgovernance.DeclaredVarsRegistry;
+import com.example.envgovernance.contract.ContractViolation;
 import com.example.envgovernance.source.EnvVarSourceRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationListener;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -20,7 +23,9 @@ import java.util.stream.Collectors;
  *   <li>{@code [REQUIRED]} — placeholder {@code ${VAR}} sem default, {@code VAR} ausente em todas as fontes</li>
  *   <li>{@code [FALLBACK]}  — placeholder {@code ${VAR:default}}, {@code VAR} ausente (usando fallback)</li>
  *   <li>{@code [NO VALUE]}  — propriedade sem valor no YAML e sem variável correspondente em nenhuma fonte</li>
- *   <li>{@code [UNUSED]}    — variáveis de ambiente sem correspondência em nenhuma propriedade</li>
+ *   <li>{@code [INVALID]}   — variáveis presentes mas com valor inválido conforme contrato declarativo</li>
+ *   <li>{@code [UNUSED]}    — variáveis de ambiente sem correspondência em nenhuma propriedade (apenas acionáveis)</li>
+ *   <li>{@code [SYSTEM]}    — vars de infraestrutura (S.O./JVM/CI) colapsadas em uma linha (modo {@code collapse})</li>
  * </ul>
  *
  * <h3>DEBUG — diagnóstico completo</h3>
@@ -41,6 +46,9 @@ import java.util.stream.Collectors;
 public class EnvVarUsageReporter implements ApplicationListener<ApplicationReadyEvent> {
 
 	private static final Logger log = LoggerFactory.getLogger(EnvVarUsageReporter.class);
+
+	/** Quantidade de nomes exibidos na linha colapsada {@code [SYSTEM]}. */
+	private static final int SYSTEM_SAMPLE_SIZE = 12;
 
 	private final EnvGovernanceProperties properties;
 
@@ -104,16 +112,38 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 				.sorted((a, b) -> a.envVarName().compareTo(b.envVarName()))
 				.toList();
 
+		// [INVALID] vars com valor inválido conforme contrato declarativo
+		List<ContractViolation> invalid = ContractRegistry.getViolations().stream()
+				.filter(v -> v.kind() == ContractViolation.Kind.INVALID)
+				.sorted(Comparator.comparing(ContractViolation::name))
+				.toList();
+
 		// [UNUSED] vars sem correspondência em nenhuma propriedade da aplicação
-		List<String> unused = allEnvVarNames.stream()
+		List<String> allUnused = allEnvVarNames.stream()
 				.filter(k -> !declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
 				.sorted()
 				.toList();
 
-		boolean hasGaps = !required.isEmpty() || !fallback.isEmpty() || !noValue.isEmpty();
-		boolean hasUnused = !unused.isEmpty() && properties.reportOrphanVars();
+		// Separa o ruído de infraestrutura (S.O./JVM/CI) das órfãs realmente acionáveis.
+		String mode = properties.systemVarMode() == null ? "collapse" : properties.systemVarMode().toLowerCase();
+		boolean partition = !"full".equals(mode);
 
-		if (!hasGaps && !hasUnused) {
+		List<String> orphans = partition
+				? allUnused.stream()
+						.filter(k -> !WellKnownSystemEnvVars.isSystemVar(k, properties.systemVarPatterns()))
+						.toList()
+				: allUnused;
+		List<String> systemNoise = partition
+				? allUnused.stream()
+						.filter(k -> WellKnownSystemEnvVars.isSystemVar(k, properties.systemVarPatterns()))
+						.toList()
+				: List.of();
+
+		boolean hasGaps = !required.isEmpty() || !fallback.isEmpty() || !noValue.isEmpty() || !invalid.isEmpty();
+		boolean hasUnused = !orphans.isEmpty() && properties.reportOrphanVars();
+		boolean hasSystem = !systemNoise.isEmpty() && properties.reportOrphanVars() && "collapse".equals(mode);
+
+		if (!hasGaps && !hasUnused && !hasSystem) {
 			log.info("[ENV GOVERNANCE] Sem gaps de configuração detectados.");
 			return;
 		}
@@ -141,15 +171,30 @@ public class EnvVarUsageReporter implements ApplicationListener<ApplicationReady
 							padRight(v.envVarName(), 45), v.propertyKey(), v.sourceFile()));
 		}
 
+		if (!invalid.isEmpty()) {
+			log.error("[INVALID] Variáveis com valor inválido conforme contrato ({}):", invalid.size());
+			invalid.forEach(v ->
+					log.error("  {}  →  {}",
+							padRight(v.name(), 45), v.message()));
+		}
+
 		if (hasUnused) {
 			int limit = properties.orphanReportLimit();
-			List<String> reported = unused.size() > limit ? unused.subList(0, limit) : unused;
-			String suffix = unused.size() > limit
-					? " (mostrando primeiras " + limit + " de " + unused.size() + ")"
+			List<String> reported = orphans.size() > limit ? orphans.subList(0, limit) : orphans;
+			String suffix = orphans.size() > limit
+					? " (mostrando primeiras " + limit + " de " + orphans.size() + ")"
 					: "";
-			log.warn("[UNUSED] Variáveis sem correspondência na aplicação ({}){}:", unused.size(), suffix);
+			log.warn("[UNUSED] Variáveis sem correspondência na aplicação ({}){}:", orphans.size(), suffix);
 			reported.forEach(k ->
 					log.warn("  {}  <{}>", padRight(k, 45), attributions.getOrDefault(k, "?")));
+		}
+
+		if (hasSystem) {
+			int sample = Math.min(systemNoise.size(), SYSTEM_SAMPLE_SIZE);
+			String names = String.join(", ", systemNoise.subList(0, sample));
+			String suffix = systemNoise.size() > sample ? ", … (lista completa em DEBUG)" : "";
+			log.info("[SYSTEM] {} variáveis de S.O./runner ignoradas: {}{}",
+					systemNoise.size(), names, suffix);
 		}
 
 		log.info("=================================================");
