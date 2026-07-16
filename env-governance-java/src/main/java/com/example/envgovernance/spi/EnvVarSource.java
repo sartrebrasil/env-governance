@@ -1,5 +1,9 @@
 package com.example.envgovernance.spi;
 
+import com.example.envgovernance.contract.ConditionalRequirement;
+import com.example.envgovernance.contract.VarSpec;
+
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -58,6 +62,31 @@ public interface EnvVarSource {
 	 * O resultado é indefinido antes de {@link #load(Map)} completar.
 	 */
 	Set<String> getVarNames();
+
+	/**
+	 * Contribui especificações de variáveis ao contrato declarativo global.
+	 * <p>
+	 * Chamado durante o bootstrap para que a fonte declare as variáveis que ela própria
+	 * requer. O contrato explícito (arquivo ou builder) tem precedência em caso de conflito
+	 * de nome. O padrão retorna lista vazia.
+	 *
+	 * @since 2.2
+	 */
+	default List<VarSpec> contributedSpecs() {
+		return List.of();
+	}
+
+	/**
+	 * Contribui requisitos condicionais ao contrato declarativo global.
+	 * <p>
+	 * Esses condicionais são concatenados com os do contrato explícito. O padrão retorna
+	 * lista vazia.
+	 *
+	 * @since 2.2
+	 */
+	default List<ConditionalRequirement> contributedConditionals() {
+		return List.of();
+	}
 
 	/**
 	 * Retorna {@code true} se o nome de variável é considerado sensível nesta fonte,

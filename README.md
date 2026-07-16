@@ -1,6 +1,8 @@
 # env-governance
 
-Biblioteca de governança de variáveis de ambiente para aplicações Java. Detecta gaps de configuração no startup — variáveis obrigatórias ausentes, placeholders sem valor, sobrescritas ativas do SO — e suporta fontes externas de segredos como o HashiCorp Vault.
+Biblioteca de governança de variáveis de ambiente para aplicações Java. Detecta gaps de configuração no startup — variáveis obrigatórias ausentes, placeholders sem valor, sobrescritas ativas do SO, **valores inválidos** e **requisitos condicionais** — e suporta fontes externas de segredos como o HashiCorp Vault.
+
+Além de verificar **presença**, a lib valida **conteúdo** a partir de um contrato declarativo opcional (`env-governance.yml`/`.properties`) ou de uma API fluente — tipos (`int`, `port`, `url`, `boolean`), conjuntos permitidos (`oneOf`), faixas (`min`/`max`), regex e regras cross-field (ex.: "se `AUTH_METHOD=approle`, então `ROLE_ID` e `SECRET_ID` são obrigatórias").
 
 Funciona em dois contextos:
 - **Spring Boot 3.x** — integração automática via `EnvironmentPostProcessor` e Actuator.
@@ -23,6 +25,13 @@ Funciona em dois contextos:
 - [Como funciona](#como-funciona)
   - [Spring Boot — pipeline de inicialização](#spring-boot--pipeline-de-inicialização)
   - [Apps não-Spring — GovernanceContext](#apps-não-spring--governancecontext)
+- [Contrato declarativo de configuração](#contrato-declarativo-de-configuração)
+  - [Modo 1: API fluente (não-Spring)](#modo-1-api-fluente-não-spring)
+  - [Modo 2: arquivo declarativo](#modo-2-arquivo-declarativo)
+  - [Atributos de uma variável](#atributos-de-uma-variável)
+  - [Requisitos condicionais](#requisitos-condicionais)
+  - [Validadores embutidos](#validadores-embutidos)
+  - [Contribuições do Vault](#contribuições-do-vault)
 - [Configuração](#configuração)
   - [Propriedades Spring Boot](#propriedades-spring-boot)
   - [Configuração do Vault](#configuração-do-vault)
@@ -65,7 +74,7 @@ O projeto é dividido em módulos com escopos bem definidos. Escolha conforme o 
 
 | Módulo | Descrição | Deps em runtime |
 |---|---|---|
-| `env-governance-java` | SPI `EnvVarSource`, `GovernanceContext` e `EnvFileReader`. Zero dependências externas — apenas JDK 21. | Nenhuma |
+| `env-governance-java` | SPI `EnvVarSource`, `GovernanceContext`, `EnvFileReader` e o motor de contrato (`EnvContract`, `Validators`, parser `.properties`). Zero dependências externas — apenas JDK 21. | Nenhuma |
 | `env-governance-core` | `EnvironmentPostProcessor`s Spring Boot que alimentam os registries estáticos no startup. | `env-governance-java`, `spring-boot` |
 | `env-governance-autoconfigure` | Auto-configuração Spring Boot, reporter de logs e endpoint Actuator. | `env-governance-core`, `spring-boot` |
 | `env-governance-starter` | Agregador: `env-governance-core` + `env-governance-autoconfigure`. | (transitivo) |
@@ -170,6 +179,19 @@ public static void main(String[] args) {
 }
 ```
 
+Além de presença, é possível validar **valor** e declarar regras condicionais na mesma cadeia fluente — ver [Contrato declarativo de configuração](#contrato-declarativo-de-configuração):
+
+```java
+GovernanceContext.builder()
+    .require("DB_URL").asUrl()
+    .require("SERVER_PORT").asPort()
+    .optional("RETRY_COUNT").asInt().min(1).max(10)
+    .require("AUTH_METHOD").oneOf("token", "approle")
+    .requireIf("AUTH_METHOD=approle", "ROLE_ID", "SECRET_ID")
+    .build()
+    .verify();  // lança EnvContractValidationException se algum valor for inválido
+```
+
 #### Carregando arquivos de configuração
 
 Se sua aplicação usa arquivos `.env` ou `.properties` para configuração local:
@@ -209,9 +231,13 @@ GovernanceResult result = GovernanceContext.builder()
 if (result.hasGaps()) {
     result.missingRequired().forEach(name ->
         System.err.println("Variável ausente: " + name));
+    result.violations().forEach(v ->            // valores inválidos e condicionais
+        System.err.println("Violação de contrato: " + v.message()));
     System.exit(1);
 }
 ```
+
+> `GovernanceResult.hasGaps()` já considera as violações de contrato. `missingRequired()` lista as ausências (incluindo condicionais promovidas); `violations()` traz todas as `ContractViolation` (`MISSING`, `CONDITIONAL_MISSING`, `INVALID`).
 
 #### Ordem de prioridade
 
@@ -290,21 +316,32 @@ GovernanceContext.builder()
              ${DB_PASSWORD}   → explicit=true, hasDefault=false (obrigatória)
              ${DB_USER:app}   → explicit=true, hasDefault=true  (opcional)
 
-3. EnvVarSourceLoaderPostProcessor (+18)
+3. EnvContractScanner (+16)
+   └─ Carrega env-governance.properties / env-governance.yml do classpath
+   └─ Junta specs/conditionals contribuídos pelas fontes SPI (ex.: Vault)
+   └─ Faz merge no ContractRegistry (opcional — sem arquivo, contrato vazio)
+
+4. EnvVarSourceLoaderPostProcessor (+18)
    └─ Descobre EnvVarSource via java.util.ServiceLoader
    └─ Chama isAvailable() → load() para cada fonte (Vault, SO, etc.)
    └─ Injeta PropertySources após "systemEnvironment"
 
-4. RequiredEnvCheckEnvironmentPostProcessor (+20)
+5. RequiredEnvCheckEnvironmentPostProcessor (+20)
    └─ Verifica vars com explicit=true AND hasDefault=false
+   └─ + nomes obrigatórios (estáticos e condicionais) do contrato
    └─ Lança MissingRequiredEnvironmentVariablesException com TODAS as ausentes
 
-5. UsageTrackingEnvironmentPostProcessor (LOWEST_PRECEDENCE)
+6. EnvContractValidationEnvironmentPostProcessor (+21)
+   └─ Valida o VALOR das vars declaradas contra o contrato (int/port/url/oneOf/…)
+   └─ Grava ContractViolation(INVALID) no ContractRegistry
+   └─ Lança EnvContractValidationException se fail-on-invalid=true (default)
+
+7. UsageTrackingEnvironmentPostProcessor (LOWEST_PRECEDENCE)
    └─ Envolve PropertySources para rastrear chaves lidas em runtime
 
-6. EnvVarUsageReporter (ApplicationReadyEvent)
-   └─ Cruza DeclaredVarsRegistry × EnvVarSourceRegistry
-       ├─ INFO  → gaps acionáveis
+8. EnvVarUsageReporter (ApplicationReadyEvent)
+   └─ Cruza DeclaredVarsRegistry × EnvVarSourceRegistry × ContractRegistry
+       ├─ INFO  → gaps acionáveis (inclui [INVALID])
        └─ DEBUG → diagnóstico completo com atribuição por fonte
 ```
 
@@ -353,6 +390,151 @@ bridge:
 
 ---
 
+## Contrato declarativo de configuração
+
+A detecção de presença responde "a variável existe?". O **contrato** vai além e responde "o valor é válido?" e "as regras cruzadas foram satisfeitas?". Ele cobre três lacunas:
+
+1. **Validação de valor** — `PORT=abc`, `DB_URL=""` ou um enum fora do conjunto permitido passam pela checagem de presença e só falham em runtime. Com o contrato, a falha para no startup.
+2. **Requisitos condicionais (cross-field)** — regras como "se `AUTH_METHOD=approle`, então `ROLE_ID` e `SECRET_ID` são obrigatórias".
+3. **Contrato explícito e versionável** — um artefato que declara o que a aplicação espera (nome, obrigatoriedade, tipo, valores permitidos, descrição, sensibilidade).
+
+> **Opcional e aditivo.** Sem contrato, o comportamento é idêntico ao de antes (só presença). Quando presente, ele *enriquece* — nunca substitui — o que já é inferido do ambiente. O núcleo `env-governance-java` continua **zero-dep**.
+
+Um mesmo modelo (`EnvContract`) é alimentado por três frentes que convergem: a **API fluente** (apps não-Spring), um **arquivo declarativo** (`env-governance.yml`/`.properties`) e **contribuições de fontes** (`EnvVarSource`, ex.: o Vault). A avaliação é pura — recebe o mapa de ambiente resolvido e devolve as violações — então Spring e não-Spring compartilham exatamente a mesma lógica.
+
+### Modo 1: API fluente (não-Spring)
+
+`require(...)` e `optional(...)` abrem um sub-builder escopado àquela variável, onde se anexam as restrições de valor. Os demais métodos do builder continuam acessíveis, então cadeias antigas permanecem válidas.
+
+```java
+GovernanceContext.builder()
+    .require("DB_URL").asUrl().describedAs("URL de conexão com o banco")
+    .require("SERVER_PORT").asPort()
+    .optional("RETRY_COUNT").asInt().min(1).max(10)
+    .require("AUTH_METHOD").oneOf("token", "approle")
+    .require("API_KEY").sensitive()
+    .requireIf("AUTH_METHOD=approle", "ROLE_ID", "SECRET_ID")
+    .build()
+    .verify();
+```
+
+- `verify()` lança `EnvContractValidationException` (com todas as violações) quando há valor inválido; lança `MissingRequiredEnvironmentVariablesException` quando há apenas ausências.
+- `check()` não lança — retorna `GovernanceResult`, cujo `violations()` traz a lista de `ContractViolation` e `hasGaps()` já considera as violações.
+
+### Modo 2: arquivo declarativo
+
+Coloque o contrato no classpath (`src/main/resources`). O scanner tenta, nesta ordem, `env-governance.properties` e depois `env-governance.yml` — o primeiro encontrado vence. O arquivo é totalmente opcional.
+
+**`env-governance.yml`** (YAML — requer o parser do `env-governance-core`, que traz SnakeYAML via Spring Boot):
+
+```yaml
+vars:
+  DB_URL:
+    required: true
+    type: url
+    description: "URL de conexão com o banco de dados"
+  SERVER_PORT:
+    type: port
+  AUTH_METHOD:
+    required: true
+    oneOf: [token, approle]
+  API_KEY:
+    required: true
+    sensitive: true
+  TIMEOUT:
+    type: int
+    min: 1
+    max: 300
+
+conditionals:
+  - when: "AUTH_METHOD=approle"
+    require: [VAULT_ROLE_ID, VAULT_SECRET_ID]
+```
+
+**`env-governance.properties`** (formato flat — suportado em qualquer ambiente, inclusive apps não-Spring zero-dep):
+
+```properties
+# Especificações de variáveis — padrão VARNAME.atributo=valor
+DB_URL.required=true
+DB_URL.type=url
+DB_URL.description=URL de conexão com o banco de dados
+
+SERVER_PORT.type=port
+
+AUTH_METHOD.required=true
+AUTH_METHOD.oneOf=token,approle
+
+API_KEY.required=true
+API_KEY.sensitive=true
+
+RETRY_COUNT.type=int
+RETRY_COUNT.min=1
+RETRY_COUNT.max=10
+
+# Requisitos condicionais — requireIf.GRUPO.when / requireIf.GRUPO.require
+requireIf.approle.when=AUTH_METHOD=approle
+requireIf.approle.require=VAULT_ROLE_ID,VAULT_SECRET_ID
+```
+
+Formatos malformados lançam `EnvContractParseException` com o nome do recurso e a causa — nunca falham em silêncio.
+
+> **Extensibilidade do parser.** O carregamento usa o SPI `EnvContractParser`, descoberto via `ServiceLoader`. `env-governance-java` registra o parser `.properties`; `env-governance-core` registra o YAML. Para suportar outro formato, implemente `EnvContractParser` e registre-o em `META-INF/services/`.
+
+### Atributos de uma variável
+
+| Atributo | `.properties` | YAML | Efeito |
+|---|---|---|---|
+| Obrigatoriedade | `NOME.required=true` | `required: true` | Ausência vira gap `[REQUIRED]` (default: `false`). |
+| Tipo | `NOME.type=port` | `type: port` | Adiciona o validador correspondente: `port`, `url`, `int`, `boolean`, `non-empty`. |
+| Conjunto permitido | `NOME.oneOf=a,b` | `oneOf: [a, b]` | Valor deve ser um dos listados (comparação exata). |
+| Regex | `NOME.regex=^\\d+$` | `regex: "^\\d+$"` | Valor deve casar totalmente com a expressão. |
+| Mínimo / máximo | `NOME.min=1` / `NOME.max=10` | `min: 1` / `max: 10` | Faixa inteira (inclusiva). |
+| Não-vazio | `NOME.nonEmpty=true` | `nonEmpty: true` | Rejeita valor em branco. |
+| Descrição | `NOME.description=...` | `description: "..."` | Texto livre para relatórios. |
+| Sensível | `NOME.sensitive=true` | `sensitive: true` | Mascara o valor em relatórios. |
+
+Os validadores só rodam quando a variável **está presente** — uma variável `optional` com tipo inválido gera `[INVALID]`; ausente, é ignorada.
+
+### Requisitos condicionais
+
+Um requisito condicional promove um conjunto de variáveis a obrigatórias **apenas quando** uma condição sobre o ambiente resolvido é satisfeita. A forma simples é uma igualdade `CHAVE=valor`:
+
+```java
+.requireIf("AUTH_METHOD=approle", "ROLE_ID", "SECRET_ID")
+```
+
+Para lógica arbitrária, use o overload com `Predicate`:
+
+```java
+.requireIf(env -> "prod".equals(env.get("APP_ENV")) && !env.containsKey("SENTRY_DSN"),
+           "APP_ENV=prod exige observabilidade", "SENTRY_DSN")
+```
+
+Quando a condição é satisfeita e a variável está ausente, ela vira uma violação `CONDITIONAL_MISSING` — reportada junto das obrigatórias ausentes e abortando o startup no mesmo estágio.
+
+### Validadores embutidos
+
+Todos implementados apenas com o JDK 21 (`com.example.envgovernance.contract.Validators`):
+
+| Validador | Fluente / `type` | Regra |
+|---|---|---|
+| Inteiro | `.asInt()` / `int` | Inteiro decimal (`Long.parseLong`). |
+| Porta | `.asPort()` / `port` | Inteiro no intervalo `1–65535`. |
+| URL | `.asUrl()` / `url` | URL absoluta com esquema (via `java.net.URI`). |
+| Booleano | `.asBoolean()` / `boolean` | `true` ou `false` (case-insensitive). |
+| Não-vazio | `.nonEmpty()` / `non-empty` | Valor não em branco. |
+| Conjunto | `.oneOf(...)` | Pertence ao conjunto (comparação exata). |
+| Regex | `.matches(regex)` | Casa totalmente com o padrão. |
+| Mínimo | `.min(n)` | Inteiro `≥ n`. |
+| Máximo | `.max(n)` | Inteiro `≤ n`. |
+| Customizado | `.withValidator(v)` | Qualquer `ValueValidator` próprio. |
+
+### Contribuições do Vault
+
+O `VaultEnvVarSource` deixou de embutir suas regras condicionais em código: agora as contribui ao contrato geral via `contributedSpecs()` / `contributedConditionals()`. Quando `VAULT_ADDR` está presente, ele declara `VAULT_AUTH_METHOD` como `oneOf(token, approle)`, `VAULT_ADDR` como `url`, e condicionais que exigem `VAULT_ROLE_ID`+`VAULT_SECRET_ID` (approle) ou `VAULT_TOKEN` (token). As guardas no `VaultClient` permanecem como defesa em profundidade.
+
+---
+
 ## Configuração
 
 ### Propriedades Spring Boot
@@ -367,6 +549,13 @@ env:
     report-on-ready: true      # false suprime o relatório no ApplicationReadyEvent
     report-orphan-vars: true   # false suprime a seção [UNUSED]
     orphan-report-limit: 50    # limita vars não utilizadas exibidas para evitar spam
+    system-var-mode: collapse  # collapse | hide | full — tratamento das vars de S.O./runner
+    system-var-patterns: []    # padrões extras p/ classificar como S.O.: FOO* (prefixo) ou FOO (exato)
+    contract:
+      enabled: true            # habilita a validação do contrato declarativo
+      fail-on-invalid: true    # aborta o startup se houver valor inválido
+      location: classpath:env-governance.yml   # reservado (ver nota)
+      strict-unknown-vars: false               # reservado (ver nota)
 ```
 
 | Propriedade | Default | Descrição |
@@ -376,6 +565,22 @@ env:
 | `env.governance.report-on-ready` | `true` | Controla se o relatório de diagnóstico é produzido no `ApplicationReadyEvent`. Desabilite se quiser apenas o endpoint Actuator. |
 | `env.governance.report-orphan-vars` | `true` | Inclui a seção `[UNUSED]`. Desabilite em ambientes com muitas vars de infraestrutura irrelevantes. |
 | `env.governance.orphan-report-limit` | `50` | Limita quantas vars não utilizadas são exibidas. |
+| `env.governance.system-var-mode` | `collapse` | Como tratar variáveis de infraestrutura (S.O., JVM, Maven, Kubernetes, runners de CI) na seção `[UNUSED]`. Ver tabela abaixo. |
+| `env.governance.system-var-patterns` | `[]` | Padrões extras para classificar variáveis como infraestrutura, somados à lista curada embutida. `FOO*` = prefixo, `FOO` = nome exato (case-insensitive). Ex.: `ACME_CI_*` para vars do runner de CI da sua organização. |
+| `env.governance.contract.enabled` | `true` | Habilita o carregamento e a validação do [contrato declarativo](#contrato-declarativo-de-configuração). Com `false`, o scanner e a validação de valor são pulados. |
+| `env.governance.contract.fail-on-invalid` | `true` | Aborta o startup (`EnvContractValidationException`) quando há valor inválido. Com `false`, as violações apenas aparecem como `[INVALID]` no relatório. |
+| `env.governance.contract.location` | `classpath:env-governance.yml` | ⚠️ **Reservado.** O scanner atual carrega os locais fixos `env-governance.properties` e `env-governance.yml` do classpath; esta propriedade ainda não é consumida. |
+| `env.governance.contract.strict-unknown-vars` | `false` | ⚠️ **Reservado.** Campo previsto para reportar variáveis presentes fora do contrato; ainda não implementado. |
+
+**Modos de `system-var-mode`:**
+
+| Modo | Efeito na seção `[UNUSED]` |
+|---|---|
+| `collapse` (padrão) | Separa o ruído de S.O./runner das órfãs acionáveis: as acionáveis são listadas em `[UNUSED]`, e as de infraestrutura são colapsadas em uma única linha `[SYSTEM]` com contagem e amostra. A lista completa continua disponível em DEBUG. |
+| `hide` | Remove totalmente as variáveis de infraestrutura do relatório INFO. Só as órfãs acionáveis aparecem em `[UNUSED]`. |
+| `full` | Comportamento legado: lista **todas** as variáveis não utilizadas em `[UNUSED]`, sem separar infraestrutura. |
+
+> **Por que isso importa:** em testes e containers, o S.O. contribui dezenas de variáveis (`PATH`, `JAVA_HOME`, `LC_*`, `SUREFIRE_*`, etc.) que nunca casam com propriedades da aplicação e inundam o `[UNUSED]`. O modo `collapse` mantém a visibilidade (uma linha) sem o spam. Se o seu runner de CI injeta variáveis próprias que ainda aparecem como órfãs, adicione o prefixo em `system-var-patterns` — sem precisar tocar na lib.
 
 **Desabilitando por perfil:**
 
@@ -487,6 +692,9 @@ INFO  ===== ENV GOVERNANCE: GAPS DE CONFIGURAÇÃO =====
 ERROR [REQUIRED] Variáveis obrigatórias ausentes no SO/container (1):
 ERROR   DB_PASSWORD                                    →  spring.datasource.password  [application.yml]
 
+ERROR [INVALID] Variáveis com valor inválido conforme contrato (1):
+ERROR   SERVER_PORT                                    →  SERVER_PORT: porta fora do intervalo 1–65535 ("70000")
+
 WARN  [FALLBACK] Variáveis ausentes no SO/container, usando valor padrão (2):
 WARN    BRIDGE_MAX_MESSAGES_PER_POLL                   →  bridge.poller.max-messages-per-poll  [application.yml]
 WARN    REDIS_PORT                                     →  spring.data.redis.port  [application-redis.yml]
@@ -494,15 +702,16 @@ WARN    REDIS_PORT                                     →  spring.data.redis.po
 WARN  [NO VALUE] Propriedades sem valor no YAML e sem variável de ambiente (1):
 WARN    SPRING_DATASOURCE_URL                          →  spring.datasource.url  [application.yml]
 
-WARN  [UNUSED] Variáveis do SO/container não utilizadas pela aplicação (148):
-WARN    COMPUTERNAME
-WARN    HOME
-WARN    JAVA_HOME
-WARN    PATH
-WARN    ...
+WARN  [UNUSED] Variáveis sem correspondência na aplicação (2):
+WARN    DB_PASSWORImD                                   <system-env>
+WARN    LEGACY_TIMEOUT                                  <system-env>
+
+INFO  [SYSTEM] 146 variáveis de S.O./runner ignoradas: COMPUTERNAME, HOME, JAVA_HOME, LANG, PATH, TEMP, … (lista completa em DEBUG)
 
 INFO  =================================================
 ```
+
+> No modo padrão `collapse`, a seção `[UNUSED]` mostra apenas variáveis **acionáveis** (typos, propriedades removidas). No exemplo, `DB_PASSWORImD` é um typo de `DB_PASSWORD`. As variáveis de infraestrutura (`PATH`, `JAVA_HOME`, etc.) são colapsadas na linha `[SYSTEM]`. Use `env.governance.system-var-mode: full` para voltar ao comportamento de listar tudo.
 
 **Sem gaps:**
 
@@ -595,7 +804,14 @@ Acesse via `GET /actuator/env-governance`.
         "sourceFile": "application.yml"
       }
     ],
-    "noValue": []
+    "noValue": [],
+    "invalid": [
+      {
+        "name": "SERVER_PORT",
+        "message": "SERVER_PORT: porta fora do intervalo 1–65535 (\"70000\")",
+        "value": "70000"
+      }
+    ]
   },
   "unused": ["HOME", "JAVA_HOME", "PATH"],
   "activeOverrides": [
@@ -626,6 +842,7 @@ Acesse via `GET /actuator/env-governance`.
 | `gaps.required` | Placeholders `${VAR}` sem default cujo `VAR` não está em nenhuma fonte. |
 | `gaps.fallback` | Placeholders `${VAR:default}` cujo `VAR` não está em nenhuma fonte (usando fallback). |
 | `gaps.noValue` | Propriedades sem valor no YAML e sem env var correspondente. |
+| `gaps.invalid` | Variáveis presentes cujo valor viola o [contrato declarativo](#contrato-declarativo-de-configuração). Cada item traz `name`, `message` e `value` observado (vazio se ausente). |
 | `unused` | Vars de todas as fontes sem correspondência em nenhuma propriedade da aplicação. |
 | `activeOverrides` | Vars que estão ativamente sobrescrevendo propriedades, com atribuição da fonte. |
 | `applicationVars` | Lista completa com `origin`: `key-derived`, `key-derived/no-value`, `placeholder-optional`, `placeholder-required`. |
@@ -713,6 +930,10 @@ A fonte é descoberta automaticamente:
 | `getVarNames()` | Após `load()` completar | Set de todos os nomes de variáveis gerenciados por esta fonte |
 | `isSensitive(varName)` | Pelos reporters | `true` para suprimir o valor nos logs (default: detecta PASSWORD/SECRET/TOKEN/KEY/CREDENTIAL) |
 | `getOrder()` | Para ordenação | Inteiro — menor valor = maior prioridade |
+| `contributedSpecs()` | Pelo scanner de contrato | `List<VarSpec>` que a fonte adiciona ao [contrato](#contrato-declarativo-de-configuração) (default: vazio) |
+| `contributedConditionals()` | Pelo scanner de contrato | `List<ConditionalRequirement>` da fonte (default: vazio) |
+
+Os dois últimos são métodos `default` (retornam vazio) — implementações existentes seguem intactas. Use-os para que a fonte declare as próprias regras de validação, como faz o `VaultEnvVarSource`. As contribuições da SPI têm menor precedência que o arquivo/builder no merge do contrato.
 
 **Comportamento em caso de falha:** controlado pela propriedade `env.governance.sources.<nome>.on-failure` (Spring Boot) ou tratado pela aplicação (não-Spring, via `GovernanceResult.hasGaps()`).
 
@@ -727,6 +948,18 @@ A fonte é descoberta automaticamente:
 O Spring Boot tentará resolver o placeholder ao injetar a propriedade. Se nenhum bean ler essa propriedade no startup, a aplicação pode subir — mas falhará silenciosamente em runtime.
 
 **O que fazer:** defina a variável no SO/container ou configure uma fonte de segredos que a forneça.
+
+---
+
+### `[INVALID]` — Crítico (`log.error`)
+
+**O que é:** a variável está presente, mas o valor viola uma regra do [contrato declarativo](#contrato-declarativo-de-configuração) — tipo (`port`, `url`, `int`, `boolean`), conjunto `oneOf`, faixa `min`/`max`, `regex` ou `non-empty`.
+
+Só aparece quando há um contrato declarado. Com `env.governance.contract.fail-on-invalid=true` (padrão), o startup é abortado com `EnvContractValidationException`; com `false`, a violação apenas é reportada aqui.
+
+**O que fazer:** corrija o valor no SO/container/fonte de segredos, ou ajuste o contrato se a regra estiver desatualizada.
+
+> Requisitos condicionais não satisfeitos (`CONDITIONAL_MISSING`) são reportados junto de `[REQUIRED]`, pois representam ausência de variável — não valor inválido.
 
 ---
 
@@ -756,7 +989,19 @@ A propriedade terá valor `null` em runtime. Componentes Spring que dependam del
 
 Possíveis causas: typo no nome, propriedade removida do YAML, variável de infraestrutura não relacionada.
 
+No modo padrão `collapse`, as variáveis de infraestrutura são separadas para a linha `[SYSTEM]` — então o `[UNUSED]` fica reservado para os casos realmente acionáveis (tipicamente typos ou propriedades removidas).
+
 **O que fazer:** verifique se o nome está correto ou se a variável pode ser removida do ambiente.
+
+---
+
+### `[SYSTEM]` — Informativo (`log.info`)
+
+**O que é:** variáveis de infraestrutura (S.O., JVM, Maven/Gradle, Kubernetes, runners de CI) presentes no ambiente mas sem correspondência com propriedades da aplicação. São colapsadas em uma única linha para não poluir o relatório.
+
+Aparece apenas no modo `env.governance.system-var-mode: collapse` (padrão). A lista completa fica disponível ativando o log DEBUG.
+
+**O que fazer:** normalmente nada — é ruído esperado. Se uma variável da sua aplicação aparecer aqui por engano, verifique a lista curada; se for específica do seu ambiente/CI, adicione o padrão em `env.governance.system-var-patterns`.
 
 ---
 

@@ -1,11 +1,16 @@
 package com.example.envgovernance.vault;
 
+import com.example.envgovernance.contract.ConditionalRequirement;
+import com.example.envgovernance.contract.Validators;
+import com.example.envgovernance.contract.VarSpec;
 import com.example.envgovernance.spi.EnvVarSource;
 import com.example.envgovernance.vault.http.VaultClient;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.logging.Logger;
 
 /**
@@ -88,6 +93,65 @@ public final class VaultEnvVarSource implements EnvVarSource {
 		return varNames;
 	}
 
+	/**
+	 * Declara as variáveis de ambiente que o Vault requer quando configurado via convenção
+	 * de env vars do S.O. ({@code VAULT_ADDR}, {@code VAULT_AUTH_METHOD}).
+	 * <p>
+	 * Apenas validação de <em>formato</em> (optional=false): a presença de
+	 * {@code VAULT_ADDR} e das credenciais é gerenciada pelos condicionais de
+	 * {@link #contributedConditionals()}, pois o Vault é opcional na aplicação.
+	 * <p>
+	 * Apps que configuram o Vault via propriedades Spring
+	 * ({@code env.governance.sources.vault.*}) não são afetadas por estas specs, pois as
+	 * chaves Spring não estão registradas aqui — os guards do {@code VaultClient} continuam
+	 * atuando como segunda linha de defesa.
+	 *
+	 * @since 2.2
+	 */
+	@Override
+	public List<VarSpec> contributedSpecs() {
+		return List.of(
+				new VarSpec("VAULT_ADDR", false, List.of(Validators.url()),
+						"Endereço do HashiCorp Vault", false, "url"),
+				new VarSpec("VAULT_AUTH_METHOD", false, List.of(Validators.oneOf("token", "approle")),
+						"Método de autenticação no Vault (token | approle)", false, "")
+		);
+	}
+
+	/**
+	 * Requisitos condicionais de credenciais quando Vault está configurado via env vars.
+	 * <p>
+	 * Cada condicional só dispara quando {@code VAULT_ADDR} está presente no ambiente,
+	 * evitando falsos positivos em aplicações que não usam o Vault. Os guards equivalentes
+	 * no {@link VaultClient} são mantidos como defesa em profundidade.
+	 *
+	 * @since 2.2
+	 */
+	@Override
+	public List<ConditionalRequirement> contributedConditionals() {
+		Predicate<Map<String, String>> vaultEnabled =
+				env -> nonBlank(env.get("VAULT_ADDR"));
+
+		Predicate<Map<String, String>> isApprole =
+				env -> "approle".equalsIgnoreCase(env.getOrDefault("VAULT_AUTH_METHOD", ""));
+
+		// Token é o padrão: dispara quando Vault está habilitado e auth ≠ approle
+		Predicate<Map<String, String>> isToken =
+				env -> vaultEnabled.test(env)
+						&& !"approle".equalsIgnoreCase(env.getOrDefault("VAULT_AUTH_METHOD", ""));
+
+		return List.of(
+				new ConditionalRequirement(
+						env -> vaultEnabled.test(env) && isApprole.test(env),
+						List.of("VAULT_ROLE_ID", "VAULT_SECRET_ID"),
+						"Vault AppRole: VAULT_ROLE_ID e VAULT_SECRET_ID obrigatórios quando VAULT_AUTH_METHOD=approle"),
+				new ConditionalRequirement(
+						isToken,
+						List.of("VAULT_TOKEN"),
+						"Vault token: VAULT_TOKEN obrigatório quando VAULT_ADDR configurado (método padrão ou explícito)")
+		);
+	}
+
 	/** Todos os segredos provenientes do Vault são sensíveis por definição. */
 	@Override
 	public boolean isSensitive(String varName) {
@@ -97,5 +161,9 @@ public final class VaultEnvVarSource implements EnvVarSource {
 	@Override
 	public int getOrder() {
 		return 10;
+	}
+
+	private static boolean nonBlank(String s) {
+		return s != null && !s.isBlank();
 	}
 }

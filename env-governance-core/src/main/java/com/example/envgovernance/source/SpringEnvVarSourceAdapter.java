@@ -18,7 +18,7 @@ import java.util.Optional;
  * @author Sartre Brasil
  * @since 2.0
  */
-final class SpringEnvVarSourceAdapter {
+public final class SpringEnvVarSourceAdapter {
 
 	private SpringEnvVarSourceAdapter() {}
 
@@ -30,7 +30,7 @@ final class SpringEnvVarSourceAdapter {
 	 * permitindo que as fontes leiam tanto propriedades Spring ({@code env.governance.sources.vault.address})
 	 * quanto variáveis do S.O. ({@code VAULT_ADDR}) sem depender do Spring diretamente.
 	 */
-	static Map<String, String> flattenEnvironment(ConfigurableEnvironment env) {
+	public static Map<String, String> flattenEnvironment(ConfigurableEnvironment env) {
 		Map<String, String> result = new LinkedHashMap<>();
 		for (PropertySource<?> ps : env.getPropertySources()) {
 			// configurationProperties é um composto interno que pode lançar exceções ao enumerar

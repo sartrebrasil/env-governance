@@ -1,11 +1,13 @@
 package com.example.envgovernance.autoconfigure;
 
+import com.example.envgovernance.ContractRegistry;
 import com.example.envgovernance.DeclaredVarsRegistry;
+import com.example.envgovernance.contract.ContractViolation;
 import com.example.envgovernance.source.EnvVarSourceRegistry;
-import com.example.envgovernance.spi.EnvVarSource;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -20,6 +22,7 @@ import java.util.stream.Collectors;
  *   <li>{@code gaps.required}   — placeholders obrigatórios ausentes em todas as fontes</li>
  *   <li>{@code gaps.fallback}   — placeholders com default ausentes (usando fallback)</li>
  *   <li>{@code gaps.noValue}    — propriedades sem valor no YAML e sem var de ambiente</li>
+ *   <li>{@code gaps.invalid}    — variáveis presentes mas com valor inválido conforme contrato</li>
  *   <li>{@code unused}          — vars sem correspondência em nenhuma propriedade (com fonte de origem)</li>
  *   <li>{@code applicationVars} — todas as variáveis potenciais (diagnóstico completo)</li>
  *   <li>{@code activeOverrides} — vars que estão sobrescrevendo propriedades (com fonte de origem)</li>
@@ -79,6 +82,16 @@ public class EnvGovernanceEndpoint {
 				.map(v -> Map.of("name", v.envVarName(), "propertyKey", v.propertyKey(), "sourceFile", v.sourceFile()))
 				.toList();
 
+		// gaps: [INVALID]
+		List<Map<String, String>> invalid = ContractRegistry.getViolations().stream()
+				.filter(v -> v.kind() == ContractViolation.Kind.INVALID)
+				.sorted(Comparator.comparing(ContractViolation::name))
+				.map(v -> Map.of(
+						"name",    v.name(),
+						"message", v.message(),
+						"value",   v.value() != null ? v.value() : ""))
+				.toList();
+
 		// vars sem correspondência — com fonte de origem
 		List<Map<String, String>> unused = allEnvVarNames.stream()
 				.filter(k -> !declaredNormalized.contains(EnvVarNormalizer.normalize(k)))
@@ -129,7 +142,7 @@ public class EnvGovernanceEndpoint {
 				.toList();
 
 		return Map.of(
-				"gaps",            Map.of("required", required, "fallback", fallback, "noValue", noValue),
+				"gaps",            Map.of("required", required, "fallback", fallback, "noValue", noValue, "invalid", invalid),
 				"unused",          unused,
 				"applicationVars", applicationVars,
 				"activeOverrides", activeOverrides,
